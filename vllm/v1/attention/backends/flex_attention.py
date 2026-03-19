@@ -27,6 +27,7 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms import current_platform
+from vllm.attention_utils.fasa import fac_mask_mod_factory
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backend import (
@@ -337,6 +338,7 @@ class FlexAttentionMetadata:
     transformed_score_mod: _score_mod_signature | None = None
     sliding_window: int | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
+    fac_selected_token_indices: torch.Tensor | None = None
 
     @cached_property
     def logical_block_ids(self):
@@ -520,6 +522,10 @@ class FlexAttentionMetadata:
             # Add prefix LM mask for vision-language prefix LM attention
             prefix_lm_mask_mod = self.get_prefix_lm_mask_mod()
             mask_mod = or_masks(mask_mod, prefix_lm_mask_mod)
+        if self.fac_selected_token_indices is not None:
+            mask_mod = and_masks(
+                mask_mod, fac_mask_mod_factory(self.fac_selected_token_indices)
+            )
         return mask_mod
 
     def get_transformed_score_mod(self) -> _score_mod_signature | None:
@@ -760,6 +766,9 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             direct_build=(self.direct_build and common_attn_metadata.causal),
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
+            fac_selected_token_indices=getattr(
+                common_attn_metadata, "fac_selected_token_indices", None
+            ),
         )
         return out
 
@@ -906,6 +915,10 @@ class FlexAttentionImpl(AttentionImpl):
 
         if self.mm_prefix_range != getattr(attn_metadata, "mm_prefix_range", None):
             self.mm_prefix_range = attn_metadata.mm_prefix_range
+            attn_metadata.mask_mod = attn_metadata.get_mask_mod()
+            needs_rebuild_block_mask = True
+
+        if attn_metadata.fac_selected_token_indices is not None:
             attn_metadata.mask_mod = attn_metadata.get_mask_mod()
             needs_rebuild_block_mask = True
 
