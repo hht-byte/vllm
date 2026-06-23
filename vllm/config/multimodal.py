@@ -173,6 +173,26 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    lrcp_retention_ratio: float | None = Field(default=None, gt=0.0, le=1.0)
+    """Sets the visual token retention ratio for LRCP pruning.
+    Value sits in range (0;1] and determines fraction of visual tokens
+    to retain after LRCP compression. Lower values mean more aggressive
+    pruning. For example, 0.111 retains ~11.1% of tokens (88.9% reduction).
+    Applies to both image and video tokens.
+    """
+    lrcp_subspace_dim: int = Field(default=4, ge=1)
+    """The PCA subspace dimension r for LRCP.
+    Controls the boundary between shared structure and discriminative
+    residuals. Default 4 for LLaVA-based models, 8 for Qwen-based models.
+    """
+    lrcp_merge: bool = Field(default=True)
+    """Whether to merge discarded tokens into nearest retained neighbors
+    in LRCP. Merging reduces information loss from pruning."""
+    lrcp_layer: int | None = Field(default=None, ge=0)
+    """The intermediate LLM layer at which to apply LRCP pruning.
+    If None, LRCP is only applied at the encoder output level.
+    For LLaVA models, recommended value is 16.
+    For Qwen models, recommended value is 14."""
     mm_tensor_ipc: MMTensorIPC = "direct_rpc"
     """IPC (inter-process communication) method for multimodal tensors.
     - "direct_rpc": Use msgspec serialization via RPC
@@ -284,4 +304,13 @@ class MultiModalConfig:
         return kwargs | dict(inference_kwargs)
 
     def is_multimodal_pruning_enabled(self):
-        return self.video_pruning_rate is not None and self.video_pruning_rate > 0
+        return (
+            (self.video_pruning_rate is not None and self.video_pruning_rate > 0)
+            or self.is_lrcp_enabled()
+        )
+
+    def is_lrcp_enabled(self):
+        return (
+            self.lrcp_retention_ratio is not None
+            and self.lrcp_retention_ratio > 0
+        )
