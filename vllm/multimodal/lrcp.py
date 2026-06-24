@@ -53,8 +53,12 @@ def lrcp_compress(
     3. Retain tokens with the highest residuals (most discriminative)
     4. Optionally merge discarded tokens into nearest retained neighbors
 
-    All internal indexing uses integer indices (torch.argsort) instead
-    of boolean mask indexing, to avoid aclnnNonzeroV2 on NPU/Ascend.
+    All PCA, SVD, and merge computations are performed on CPU to
+    avoid NPU/Ascend kernel compatibility issues (aclnnNonzeroV2,
+    SVD memory allocation failures on AICPU). For typical visual
+    token matrices (N < 3000, D < 4096), CPU computation overhead
+    is negligible (< 1ms). Results are transferred back to the
+    original device and dtype.
 
     Args:
         embeddings: Visual token embeddings of shape (N, D).
@@ -68,18 +72,23 @@ def lrcp_compress(
     Returns:
         Tuple of:
         - compressed_embeddings: (K, D) retained (and optionally merged)
-          token embeddings, in the original dtype
-        - top_indices: (K,) long tensor of retained token indices
+          token embeddings, in the original dtype and device
+        - top_indices: (K,) long tensor of retained token indices,
+          on the original device
     """
     N, D = embeddings.shape
     orig_dtype = embeddings.dtype
+    orig_device = embeddings.device
 
     if num_retain >= N:
-        return embeddings, torch.arange(N, device=embeddings.device)
+        return embeddings, torch.arange(N, device=orig_device)
 
-    emb_f32 = embeddings.float()
-    mean = emb_f32.mean(dim=0, keepdim=True)
-    centered = emb_f32 - mean
+    # Move to CPU for all PCA/SVD/merge computation.
+    # NPU/Ascend AICPU SVD kernel has memory and compatibility issues.
+    emb_cpu = embeddings.float().cpu()
+
+    mean = emb_cpu.mean(dim=0, keepdim=True)
+    centered = emb_cpu - mean
 
     U, S, Vh = torch.linalg.svd(centered, full_matrices=False)
     U_r = Vh[:subspace_dim, :].T
@@ -89,12 +98,12 @@ def lrcp_compress(
     scores = (residual ** 2).sum(dim=-1)
 
     sorted_indices = torch.argsort(scores, descending=True)
-    top_indices = sorted_indices[:num_retain]
-    retained = emb_f32[top_indices]
+    top_indices_cpu = sorted_indices[:num_retain]
+    retained = emb_cpu[top_indices_cpu]
 
     if merge and num_retain < N:
-        discarded_indices = sorted_indices[num_retain:]
-        discarded = emb_f32[discarded_indices]
+        discarded_indices_cpu = sorted_indices[num_retain:]
+        discarded = emb_cpu[discarded_indices_cpu]
 
         cos_sim = F.cosine_similarity(
             discarded.unsqueeze(1),
@@ -109,7 +118,9 @@ def lrcp_compress(
         sums.index_add_(0, nearest, discarded)
         retained = (retained + sums) / (1 + counts.unsqueeze(-1))
 
-    retained = retained.to(orig_dtype)
+    # Transfer results back to original device and dtype
+    retained = retained.to(dtype=orig_dtype, device=orig_device)
+    top_indices = top_indices_cpu.to(orig_device)
 
     return retained, top_indices
 
