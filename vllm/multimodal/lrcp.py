@@ -53,40 +53,36 @@ def lrcp_compress(
         - retention_mask: (N,) boolean mask indicating retained tokens
     """
     N, D = embeddings.shape
+    orig_dtype = embeddings.dtype
 
     if num_retain >= N:
         return embeddings, torch.ones(N, dtype=torch.bool, device=embeddings.device)
 
-    mean = embeddings.mean(dim=0, keepdim=True)
-    centered = embeddings - mean
+    # Cast to float32 for SVD: BFloat16 not supported on NPU/Ascend
+    # and float32 provides sufficient precision for PCA computation
+    emb_f32 = embeddings.float()
+    mean = emb_f32.mean(dim=0, keepdim=True)
+    centered = emb_f32 - mean
 
-    # Low-rank PCA via SVD (Halko et al., 2011 style)
-    # For typical visual token matrices (N < 3000, D < 4096),
-    # full SVD is efficient enough
     U, S, Vh = torch.linalg.svd(centered, full_matrices=False)
     U_r = Vh[:subspace_dim, :].T  # (D, r) top r principal directions
 
-    # Projection residual: s_i = ||x_i(I - P_r)||_2^2
-    # Efficient: residual = centered - centered @ U_r @ U_r.T
     proj = centered @ U_r  # (N, r) projection onto subspace
     residual = centered - proj @ U_r.T  # (N, D) residual component
     scores = (residual ** 2).sum(dim=-1)  # (N,) projection residual scores
 
-    # Retain tokens with highest projection residuals
     _, top_indices = torch.topk(scores, k=num_retain, largest=True, sorted=True)
     retention_mask = torch.zeros(N, dtype=torch.bool, device=embeddings.device)
     retention_mask[top_indices] = True
 
-    retained = embeddings[retention_mask]  # (K, D)
+    retained = emb_f32[retention_mask]  # (K, D) in float32
 
-    # Token merging: assign each discarded token to nearest retained
-    # neighbor (cosine similarity), then average
     if merge and num_retain < N:
-        discarded = embeddings[~retention_mask]  # (N-K, D)
+        discarded = emb_f32[~retention_mask]  # (N-K, D)
 
         cos_sim = F.cosine_similarity(
-            discarded.unsqueeze(1),  # (N-K, 1, D)
-            retained.unsqueeze(0),   # (1, K, D)
+            discarded.unsqueeze(1),
+            retained.unsqueeze(0),
             dim=-1,
         )  # (N-K, K)
         nearest = cos_sim.argmax(dim=-1)  # (N-K,)
@@ -96,6 +92,9 @@ def lrcp_compress(
         sums = torch.zeros_like(retained)
         sums.index_add_(0, nearest, discarded)
         retained = (retained + sums) / (1 + counts.unsqueeze(-1))
+
+    # Cast back to original dtype (BFloat16, Float16, etc.)
+    retained = retained.to(orig_dtype)
 
     return retained, retention_mask
 
