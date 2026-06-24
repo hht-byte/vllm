@@ -1,6 +1,10 @@
 import torch
 
-from vllm.multimodal.lrcp import compute_lrcp_retained_tokens_count, lrcp_compress
+from vllm.multimodal.lrcp import (
+    compute_lrcp_retained_tokens_count,
+    lrcp_compress,
+    bool_mask_to_indices,
+)
 
 
 _original_forward_methods = {}
@@ -206,7 +210,8 @@ def _apply_layer_lrcp(hidden_states, residual, input_ids, model):
     merge = mm_config.lrcp_merge
 
     # Identify multimodal token positions from input_ids
-    # This works for models that use specific token IDs for MM placeholders
+    # Use integer indices instead of boolean mask indexing
+    # to avoid aclnnNonzeroV2 on NPU/Ascend
     if input_ids is not None:
         mm_token_ids = _get_mm_token_ids(model)
         if mm_token_ids:
@@ -215,21 +220,23 @@ def _apply_layer_lrcp(hidden_states, residual, input_ids, model):
                 is_mm |= (input_ids == tid)
 
             if is_mm.any():
-                mm_hidden = hidden_states[is_mm]
+                mm_indices = bool_mask_to_indices(is_mm)
+                mm_hidden = hidden_states[mm_indices]
                 num_retain = compute_lrcp_retained_tokens_count(
                     mm_hidden.shape[0], retention_ratio
                 )
-                compressed, retention_mask = lrcp_compress(
+                compressed, top_indices = lrcp_compress(
                     mm_hidden, num_retain, subspace_dim, merge
                 )
-                hidden_states[is_mm] = compressed
+                retained_indices = mm_indices[top_indices]
+                hidden_states[retained_indices] = compressed
 
                 if residual is not None:
-                    mm_residual = residual[is_mm]
+                    mm_residual = residual[mm_indices]
                     mm_residual_compressed, _ = lrcp_compress(
                         mm_residual, num_retain, subspace_dim, merge
                     )
-                    residual[is_mm] = mm_residual_compressed
+                    residual[retained_indices] = mm_residual_compressed
 
     return hidden_states, residual
 

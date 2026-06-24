@@ -23,6 +23,22 @@ def compute_lrcp_retained_tokens_count(
     return max(1, round(num_tokens * retention_ratio))
 
 
+def bool_mask_to_indices(mask: torch.Tensor) -> torch.Tensor:
+    """Convert a boolean mask to integer indices without using nonzero on device.
+
+    NPU/Ascend does not support aclnnNonzeroV2 for boolean tensors.
+    This function transfers the mask to CPU, runs nonzero there,
+    and transfers the resulting indices back to the original device.
+
+    Args:
+        mask: Boolean tensor of shape (N,).
+
+    Returns:
+        Long tensor of indices where mask is True, on the same device.
+    """
+    return mask.cpu().nonzero().squeeze(-1).to(mask.device)
+
+
 def lrcp_compress(
     embeddings: torch.Tensor,
     num_retain: int,
@@ -37,6 +53,9 @@ def lrcp_compress(
     3. Retain tokens with the highest residuals (most discriminative)
     4. Optionally merge discarded tokens into nearest retained neighbors
 
+    All internal indexing uses integer indices (torch.argsort) instead
+    of boolean mask indexing, to avoid aclnnNonzeroV2 on NPU/Ascend.
+
     Args:
         embeddings: Visual token embeddings of shape (N, D).
         num_retain: Number of tokens to retain (K).
@@ -49,43 +68,40 @@ def lrcp_compress(
     Returns:
         Tuple of:
         - compressed_embeddings: (K, D) retained (and optionally merged)
-          token embeddings
-        - retention_mask: (N,) boolean mask indicating retained tokens
+          token embeddings, in the original dtype
+        - top_indices: (K,) long tensor of retained token indices
     """
     N, D = embeddings.shape
     orig_dtype = embeddings.dtype
 
     if num_retain >= N:
-        return embeddings, torch.ones(N, dtype=torch.bool, device=embeddings.device)
+        return embeddings, torch.arange(N, device=embeddings.device)
 
-    # Cast to float32 for SVD: BFloat16 not supported on NPU/Ascend
-    # and float32 provides sufficient precision for PCA computation
     emb_f32 = embeddings.float()
     mean = emb_f32.mean(dim=0, keepdim=True)
     centered = emb_f32 - mean
 
     U, S, Vh = torch.linalg.svd(centered, full_matrices=False)
-    U_r = Vh[:subspace_dim, :].T  # (D, r) top r principal directions
+    U_r = Vh[:subspace_dim, :].T
 
-    proj = centered @ U_r  # (N, r) projection onto subspace
-    residual = centered - proj @ U_r.T  # (N, D) residual component
-    scores = (residual ** 2).sum(dim=-1)  # (N,) projection residual scores
+    proj = centered @ U_r
+    residual = centered - proj @ U_r.T
+    scores = (residual ** 2).sum(dim=-1)
 
-    _, top_indices = torch.topk(scores, k=num_retain, largest=True, sorted=True)
-    retention_mask = torch.zeros(N, dtype=torch.bool, device=embeddings.device)
-    retention_mask[top_indices] = True
-
-    retained = emb_f32[retention_mask]  # (K, D) in float32
+    sorted_indices = torch.argsort(scores, descending=True)
+    top_indices = sorted_indices[:num_retain]
+    retained = emb_f32[top_indices]
 
     if merge and num_retain < N:
-        discarded = emb_f32[~retention_mask]  # (N-K, D)
+        discarded_indices = sorted_indices[num_retain:]
+        discarded = emb_f32[discarded_indices]
 
         cos_sim = F.cosine_similarity(
             discarded.unsqueeze(1),
             retained.unsqueeze(0),
             dim=-1,
-        )  # (N-K, K)
-        nearest = cos_sim.argmax(dim=-1)  # (N-K,)
+        )
+        nearest = cos_sim.argmax(dim=-1)
 
         counts = torch.bincount(nearest, minlength=num_retain).float()
         counts[counts == 0] = 1.0
@@ -93,10 +109,9 @@ def lrcp_compress(
         sums.index_add_(0, nearest, discarded)
         retained = (retained + sums) / (1 + counts.unsqueeze(-1))
 
-    # Cast back to original dtype (BFloat16, Float16, etc.)
     retained = retained.to(orig_dtype)
 
-    return retained, retention_mask
+    return retained, top_indices
 
 
 def lrcp_compress_with_positions(
@@ -111,8 +126,11 @@ def lrcp_compress_with_positions(
     When position channels are appended to embeddings (as done for
     M-RoPE models like Qwen2.5-VL), this function:
     1. Runs LRCP on the embedding part (first D columns)
-    2. Prunes the position part using the same retention_mask
+    2. Prunes the position part using the same top_indices
     3. Optionally merges position channels alongside embeddings
+
+    Uses integer indexing (top_indices) instead of boolean mask
+    indexing, to avoid aclnnNonzeroV2 on NPU/Ascend.
 
     Args:
         embeddings: Token embeddings of shape (N, D+P) where the
@@ -133,12 +151,12 @@ def lrcp_compress_with_positions(
     else:
         emb_only = embeddings
 
-    compressed, retention_mask = lrcp_compress(
+    compressed, top_indices = lrcp_compress(
         emb_only, num_retain, subspace_dim, merge
     )
 
     if positions is not None:
-        compressed_positions = positions[retention_mask]
+        compressed_positions = positions[top_indices]
     else:
         compressed_positions = None
 

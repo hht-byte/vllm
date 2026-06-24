@@ -1,6 +1,10 @@
 import torch
 
-from vllm.multimodal.lrcp import compute_lrcp_retained_tokens_count, lrcp_compress
+from vllm.multimodal.lrcp import (
+    compute_lrcp_retained_tokens_count,
+    lrcp_compress,
+    bool_mask_to_indices,
+)
 from vllm.multimodal.evs import compute_mrope_for_media
 
 
@@ -105,10 +109,10 @@ def patch_qwen2_5_vl_model():
                     thw, merge_size,
                 ).to(emb.device)
                 positions = positions[:original_tokens]
-                _, retention_mask = lrcp_compress(
+                _, top_indices = lrcp_compress(
                     emb, num_retain, subspace_dim, merge=False
                 )
-                positions = positions[retention_mask]
+                positions = positions[top_indices]
                 compressed = torch.cat([compressed, positions], dim=1)
 
             compressed_list.append(compressed)
@@ -143,12 +147,13 @@ def patch_qwen2_5_vl_model():
                     spatial_merge_size=self.visual.spatial_merge_size,
                     q=self.video_pruning_rate,
                 )
-                emb = emb[evs_mask]
+                evs_indices = bool_mask_to_indices(evs_mask)
+                emb = emb[evs_indices]
                 original_tokens_retained = emb.shape[0]
                 num_retain = compute_lrcp_retained_tokens_count(
                     original_tokens_retained, retention_ratio
                 )
-                compressed, retention_mask = lrcp_compress(
+                compressed, top_indices = lrcp_compress(
                     emb, num_retain, subspace_dim, merge
                 )
 
@@ -161,14 +166,14 @@ def patch_qwen2_5_vl_model():
                     tokens_per_second=tokens_per_second,
                     video_second_per_grid=video_second_per_grid_t,
                 ).to(emb.device)
-                positions = positions[:original_tokens][evs_mask]
-                positions = positions[retention_mask]
+                positions = positions[:original_tokens][evs_indices]
+                positions = positions[top_indices]
                 compressed = torch.cat([compressed, positions], dim=1)
             else:
                 num_retain = compute_lrcp_retained_tokens_count(
                     original_tokens, retention_ratio
                 )
-                compressed, retention_mask = lrcp_compress(
+                compressed, top_indices = lrcp_compress(
                     emb, num_retain, subspace_dim, merge
                 )
 
@@ -181,7 +186,7 @@ def patch_qwen2_5_vl_model():
                             if second_per_grid_ts is not None else 1.0
                         ),
                     ).to(emb.device)
-                    positions = positions[:original_tokens][retention_mask]
+                    positions = positions[:original_tokens][top_indices]
                     compressed = torch.cat([compressed, positions], dim=1)
 
             compressed_list.append(compressed)
