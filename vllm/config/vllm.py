@@ -1618,22 +1618,6 @@ class VllmConfig:
         if architecture is None:
             return
 
-    def _apply_lrcp_patches(self):
-        if (
-            self.model_config is not None
-            and self.model_config.multimodal_config is not None
-            and self.model_config.multimodal_config.is_lrcp_enabled()
-        ):
-            try:
-                from lrcp_vllm import apply_patches
-                apply_patches()
-            except ImportError:
-                logger.warning_once(
-                    "LRCP is enabled but lrcp_vllm package is not installed. "
-                    "Install it or add it to your Python path to use LRCP.",
-                    scope="global",
-                )
-
         from vllm.model_executor.models.config import (
             MODELS_CONFIG_MAP,
             HybridAttentionMambaModelConfig,
@@ -1671,6 +1655,22 @@ class VllmConfig:
                     f"'runai_streamer_sharded', "
                     f"but got '{self.load_config.load_format}'. "
                     f"Model: {self.model_config.model}"
+                )
+
+    def _apply_lrcp_patches(self):
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.is_lrcp_enabled()
+        ):
+            try:
+                from lrcp_vllm import apply_patches
+                apply_patches()
+            except ImportError:
+                logger.warning_once(
+                    "LRCP is enabled but lrcp_vllm package is not installed. "
+                    "Install it or add it to your Python path to use LRCP.",
+                    scope="global",
                 )
 
     def compile_debug_dump_path(self) -> Path | None:
