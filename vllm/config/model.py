@@ -323,6 +323,10 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
+    lrcp_retention_ratio: InitVar[float | None] = None
+    lrcp_subspace_dim: InitVar[int | None] = None
+    lrcp_merge: InitVar[bool | None] = None
+    lrcp_layer: InitVar[int | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
 
     def compute_hash(self) -> str:
@@ -444,6 +448,10 @@ class ModelConfig:
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
+        lrcp_retention_ratio: float | None,
+        lrcp_subspace_dim: int | None,
+        lrcp_merge: bool | None,
+        lrcp_layer: int | None,
         mm_tensor_ipc: MMTensorIPC,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
@@ -638,6 +646,10 @@ class ModelConfig:
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
+                lrcp_retention_ratio=lrcp_retention_ratio,
+                lrcp_subspace_dim=lrcp_subspace_dim,
+                lrcp_merge=lrcp_merge,
+                lrcp_layer=lrcp_layer,
                 mm_tensor_ipc=mm_tensor_ipc,
             )
 
