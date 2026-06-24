@@ -689,6 +689,8 @@ class VllmConfig:
 
         self.try_verify_and_update_config()
 
+        self._apply_lrcp_patches()
+
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
@@ -1615,6 +1617,22 @@ class VllmConfig:
         architecture = self.model_config.architecture
         if architecture is None:
             return
+
+    def _apply_lrcp_patches(self):
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.is_lrcp_enabled()
+        ):
+            try:
+                from lrcp_vllm import apply_patches
+                apply_patches()
+            except ImportError:
+                logger.warning_once(
+                    "LRCP is enabled but lrcp_vllm package is not installed. "
+                    "Install it or add it to your Python path to use LRCP.",
+                    scope="global",
+                )
 
         from vllm.model_executor.models.config import (
             MODELS_CONFIG_MAP,
