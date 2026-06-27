@@ -173,6 +173,30 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    coast_retention_ratio: float | None = Field(default=None, gt=0.0, le=1.0)
+    """COAST visual token retention ratio. Fraction of visual tokens to
+    retain after pruning. e.g. 0.222 = retain 22.2% (77.8% reduction).
+    When set, COAST (COntrastive Adaptive Semantic Token Pruning) is
+    enabled, which uses entropy-driven dynamic budgeting and contrastive
+    semantic routing for adaptive visual token compression.
+    """
+    coast_alpha_min: float = Field(default=0.05, ge=0.0, le=1.0)
+    """COAST alpha_min: minimum fraction of the non-anchor budget
+    allocated to complementary spatial context tokens. Controls the
+    lower bound of the entropy-driven budget split."""
+    coast_alpha_max: float = Field(default=0.15, ge=0.0, le=1.0)
+    """COAST alpha_max: maximum fraction of the non-anchor budget
+    allocated to complementary spatial context tokens. Controls the
+    upper bound of the entropy-driven budget split."""
+    coast_anchor_ratio: float = Field(default=0.8, gt=0.0, le=1.0)
+    """COAST anchor ratio: fraction of the total retention budget
+    allocated to query-specific anchor tokens selected by cross-modal
+    attention/similarity."""
+    coast_layer: int | None = Field(default=None, ge=0)
+    """COAST intermediate pruning layer index. When set, COAST applies
+    contrastive semantic routing at this decoder layer using cross-modal
+    hidden state similarity. Recommended: 2 for LLaVA (shallow pruning),
+    14 for Qwen models. When None, COAST only prunes at encoder output."""
     mm_tensor_ipc: MMTensorIPC = "direct_rpc"
     """IPC (inter-process communication) method for multimodal tensors.
     - "direct_rpc": Use msgspec serialization via RPC
@@ -285,3 +309,9 @@ class MultiModalConfig:
 
     def is_multimodal_pruning_enabled(self):
         return self.video_pruning_rate is not None and self.video_pruning_rate > 0
+
+    def is_coast_enabled(self):
+        return (
+            self.coast_retention_ratio is not None
+            and self.coast_retention_ratio > 0.0
+        )

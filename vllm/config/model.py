@@ -323,6 +323,11 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
+    coast_retention_ratio: InitVar[float | None] = None
+    coast_alpha_min: InitVar[float | None] = None
+    coast_alpha_max: InitVar[float | None] = None
+    coast_anchor_ratio: InitVar[float | None] = None
+    coast_layer: InitVar[int | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
 
     def compute_hash(self) -> str:
@@ -444,6 +449,11 @@ class ModelConfig:
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
+        coast_retention_ratio: float | None,
+        coast_alpha_min: float | None,
+        coast_alpha_max: float | None,
+        coast_anchor_ratio: float | None,
+        coast_layer: int | None,
         mm_tensor_ipc: MMTensorIPC,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
@@ -638,6 +648,11 @@ class ModelConfig:
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
+                coast_retention_ratio=coast_retention_ratio,
+                coast_alpha_min=coast_alpha_min,
+                coast_alpha_max=coast_alpha_max,
+                coast_anchor_ratio=coast_anchor_ratio,
+                coast_layer=coast_layer,
                 mm_tensor_ipc=mm_tensor_ipc,
             )
 

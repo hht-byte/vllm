@@ -511,6 +511,11 @@ class EngineArgs:
     renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
+    coast_retention_ratio: float | None = MultiModalConfig.coast_retention_ratio
+    coast_alpha_min: float = MultiModalConfig.coast_alpha_min
+    coast_alpha_max: float = MultiModalConfig.coast_alpha_max
+    coast_anchor_ratio: float = MultiModalConfig.coast_anchor_ratio
+    coast_layer: int | None = MultiModalConfig.coast_layer
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     # LoRA fields
     enable_lora: bool = False
@@ -1114,6 +1119,22 @@ class EngineArgs:
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]
         )
         multimodal_group.add_argument(
+            "--coast-retention-ratio",
+            **multimodal_kwargs["coast_retention_ratio"],
+        )
+        multimodal_group.add_argument(
+            "--coast-alpha-min", **multimodal_kwargs["coast_alpha_min"]
+        )
+        multimodal_group.add_argument(
+            "--coast-alpha-max", **multimodal_kwargs["coast_alpha_max"]
+        )
+        multimodal_group.add_argument(
+            "--coast-anchor-ratio", **multimodal_kwargs["coast_anchor_ratio"]
+        )
+        multimodal_group.add_argument(
+            "--coast-layer", **multimodal_kwargs["coast_layer"]
+        )
+        multimodal_group.add_argument(
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
 
@@ -1447,6 +1468,11 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
+            coast_retention_ratio=self.coast_retention_ratio,
+            coast_alpha_min=self.coast_alpha_min,
+            coast_alpha_max=self.coast_alpha_max,
+            coast_anchor_ratio=self.coast_anchor_ratio,
+            coast_layer=self.coast_layer,
             mm_tensor_ipc=self.mm_tensor_ipc,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,

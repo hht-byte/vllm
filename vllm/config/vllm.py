@@ -676,6 +676,16 @@ class VllmConfig:
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
 
+    def _apply_coast_patches(self):
+        """Auto-apply COAST monkey-patches when COAST is enabled."""
+        if (
+            self.model_config is not None
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.is_coast_enabled()
+        ):
+            from coast_vllm import apply_patches
+            apply_patches()
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -688,6 +698,7 @@ class VllmConfig:
             )
 
         self.try_verify_and_update_config()
+        self._apply_coast_patches()
 
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
