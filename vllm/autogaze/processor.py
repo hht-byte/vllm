@@ -65,6 +65,20 @@ def _to_thwc_video(video: object) -> torch.Tensor:
     raise ValueError("AutoGaze expects RGB video input")
 
 
+def _to_hwc_image(image: object) -> torch.Tensor:
+    if isinstance(image, torch.Tensor):
+        tensor = image
+    else:
+        tensor = torch.as_tensor(np.asarray(image))
+    if tensor.ndim != 3:
+        raise ValueError("AutoGaze expects image input with three dimensions")
+    if tensor.shape[-1] == 3:
+        return tensor
+    if tensor.shape[0] == 3:
+        return tensor.permute(1, 2, 0)
+    raise ValueError("AutoGaze expects RGB image input")
+
+
 def _sample_and_resize_video(
     video: object,
     *,
@@ -217,6 +231,59 @@ def _qwen_patchify_scales(
     return torch.cat(frame_major_pixels), scale_grids
 
 
+def _qwen_patchify_image_scales(
+    processor,
+    image: np.ndarray,
+    *,
+    config: AutoGazeConfig,
+    mm_kwargs: Mapping[str, object],
+    tok_kwargs: Mapping[str, object],
+) -> tuple[torch.Tensor, list[tuple[int, int]]]:
+    clean_kwargs = dict(mm_kwargs)
+    for key in ("size", "min_pixels", "max_pixels"):
+        clean_kwargs.pop(key, None)
+    clean_kwargs.update(do_resize=False)
+
+    pixels_per_scale: list[torch.Tensor] = []
+    scale_grids: list[tuple[int, int]] = []
+    for scale in config.scales:
+        if scale == config.scales[-1]:
+            scaled_image = image
+        else:
+            tensor = torch.from_numpy(image).permute(2, 0, 1).float()[None]
+            tensor = F.interpolate(
+                tensor,
+                size=(scale, scale),
+                mode="bicubic",
+                align_corners=False,
+                antialias=True,
+            )
+            scaled_image = (
+                tensor[0]
+                .clamp(0, 255)
+                .round()
+                .to(dtype=torch.uint8)
+                .permute(1, 2, 0)
+                .numpy()
+            )
+
+        outputs = BaseMultiModalProcessor._call_hf_processor(
+            processor,
+            prompt="<|vision_start|><|image_pad|><|vision_end|>",
+            mm_data={"images": [scaled_image]},
+            mm_kwargs=clean_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+        grid = outputs["image_grid_thw"][0]
+        grid_t, height, width = (int(value) for value in grid.tolist())
+        if grid_t != 1:
+            raise ValueError("Qwen images must produce exactly one temporal grid")
+        pixels_per_scale.append(outputs["pixel_values"])
+        scale_grids.append((height, width))
+
+    return torch.cat(pixels_per_scale), scale_grids
+
+
 def _pad_tensors(tensors: list[torch.Tensor], value: int = 0) -> torch.Tensor:
     if not tensors:
         raise ValueError("Cannot pad an empty tensor list")
@@ -234,7 +301,7 @@ def _pad_tensors(tensors: list[torch.Tensor], value: int = 0) -> torch.Tensor:
     return output
 
 
-def build_qwen3_5_autogaze_outputs(
+def _build_qwen3_5_autogaze_video_outputs(
     processor,
     *,
     mm_data: Mapping[str, object],
@@ -372,3 +439,144 @@ def build_qwen3_5_autogaze_outputs(
         ),
     )
     return BatchFeature(outputs)
+
+
+def _build_qwen3_5_autogaze_image_outputs(
+    processor,
+    *,
+    mm_data: Mapping[str, object],
+    mm_kwargs: Mapping[str, object],
+    tok_kwargs: Mapping[str, object],
+    original_outputs: BatchFeature,
+    config: AutoGazeConfig,
+) -> BatchFeature:
+    images = list(mm_data.get("images", []))
+    if not images:
+        return original_outputs
+
+    hf_config = processor.info.get_hf_config()
+    vision_config = hf_config.vision_config
+    patch_size = int(vision_config.patch_size)
+    merge_size = int(vision_config.spatial_merge_size)
+    target_patch_size = patch_size * merge_size
+    if any(scale % target_patch_size for scale in config.scales):
+        raise ValueError(
+            "Every AutoGaze scale must be divisible by Qwen patch_size * "
+            "spatial_merge_size"
+        )
+
+    per_image: list[dict[str, torch.Tensor]] = []
+    for raw_image in images:
+        frame = _to_hwc_image(raw_image)
+        image = _sample_and_resize_video(
+            frame[None],
+            num_frames=1,
+            size=config.scales[-1],
+        )
+        gaze = _run_autogaze(
+            image,
+            config=config,
+            target_patch_size=target_patch_size,
+        )
+        tokens_per_source_frame = sum(
+            (scale // target_patch_size) ** 2 for scale in config.scales
+        )
+        image_positions = coalesce_gazing_to_tubelets(
+            gaze["gazing_pos"],
+            gaze["if_padded_gazing"],
+            gaze["num_gazing_each_frame"],
+            tokens_per_frame=tokens_per_source_frame,
+            temporal_patch_size=1,
+        )
+        if len(image_positions) != 1:
+            raise ValueError("A Qwen image must produce exactly one gaze grid")
+
+        full_pixels, scale_grids = _qwen_patchify_image_scales(
+            processor,
+            image[0],
+            config=config,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+        selected_rows, output_counts, mrope_positions, full_grid_thw = (
+            expand_gazing_for_qwen_merge(
+                image_positions,
+                scale_grids,
+                spatial_merge_size=merge_size,
+            )
+        )
+        if not output_counts or output_counts[0] <= 0:
+            raise ValueError("AutoGaze must retain at least one token per image")
+
+        per_image.append(
+            {
+                "pixels": full_pixels,
+                "selected_rows": selected_rows,
+                "mrope_positions": mrope_positions,
+                "full_grid_thw": torch.tensor(full_grid_thw, dtype=torch.long),
+                "image_grid_thw": torch.tensor(
+                    [
+                        1,
+                        config.scales[-1] // patch_size,
+                        config.scales[-1] // patch_size,
+                    ],
+                    dtype=torch.long,
+                ),
+            }
+        )
+
+    outputs = dict(original_outputs)
+    outputs.update(
+        pixel_values=torch.cat([item["pixels"] for item in per_image]),
+        image_grid_thw=torch.stack([item["image_grid_thw"] for item in per_image]),
+        autogaze_image_gazing_pos=_pad_tensors(
+            [item["selected_rows"] for item in per_image]
+        ),
+        autogaze_image_gazing_pos_length=torch.tensor(
+            [item["selected_rows"].numel() for item in per_image], dtype=torch.long
+        ),
+        autogaze_image_mrope_positions=_pad_tensors(
+            [item["mrope_positions"] for item in per_image]
+        ),
+        autogaze_image_num_output_tokens=torch.tensor(
+            [item["mrope_positions"].shape[0] for item in per_image], dtype=torch.long
+        ),
+        autogaze_image_full_grid_thw=_pad_tensors(
+            [item["full_grid_thw"] for item in per_image]
+        ),
+        autogaze_image_num_grids=torch.tensor(
+            [item["full_grid_thw"].shape[0] for item in per_image], dtype=torch.long
+        ),
+        autogaze_image_full_patch_counts=torch.tensor(
+            [item["pixels"].shape[0] for item in per_image], dtype=torch.long
+        ),
+    )
+    return BatchFeature(outputs)
+
+
+def build_qwen3_5_autogaze_outputs(
+    processor,
+    *,
+    mm_data: Mapping[str, object],
+    mm_kwargs: Mapping[str, object],
+    tok_kwargs: Mapping[str, object],
+    original_outputs: BatchFeature,
+    config: AutoGazeConfig,
+) -> BatchFeature:
+    """Apply AutoGaze independently to Qwen3.5 image and video inputs."""
+    outputs = _build_qwen3_5_autogaze_image_outputs(
+        processor,
+        mm_data=mm_data,
+        mm_kwargs=mm_kwargs,
+        tok_kwargs=tok_kwargs,
+        original_outputs=original_outputs,
+        config=config,
+    )
+    return _build_qwen3_5_autogaze_video_outputs(
+        processor,
+        mm_data=mm_data,
+        mm_kwargs=mm_kwargs,
+        tok_kwargs=tok_kwargs,
+        original_outputs=outputs,
+        config=config,
+    )

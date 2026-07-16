@@ -39,27 +39,27 @@ class AutoGazeConfig:
     def from_env(cls) -> AutoGazeConfig:
         scales = tuple(
             int(scale)
-            for scale in os.getenv("VLLM_AUTOGAZE_SCALES", "64+128+224+448").split("+")
+            for scale in os.getenv("AUTOGAZE_SCALES", "64+128+224+448").split("+")
         )
-        task_loss_raw = os.getenv("VLLM_AUTOGAZE_TASK_LOSS", "0.7").strip()
+        task_loss_raw = os.getenv("AUTOGAZE_TASK_LOSS", "0.7").strip()
         task_loss = (
             None
             if task_loss_raw.lower() in {"", "none", "null"}
             else float(task_loss_raw)
         )
         config = cls(
-            enabled=_env_bool("VLLM_AUTOGAZE_ENABLED", False),
-            model_id=os.getenv("VLLM_AUTOGAZE_MODEL_ID", "nvidia/AutoGaze"),
+            enabled=_env_bool("AUTOGAZE_ENABLED", False),
+            model_id=os.getenv("AUTOGAZE_MODEL_ID", "nvidia/AutoGaze"),
             scales=scales,
-            gazing_ratio=float(os.getenv("VLLM_AUTOGAZE_GAZING_RATIO", "0.1")),
+            gazing_ratio=float(os.getenv("AUTOGAZE_GAZING_RATIO", "0.1")),
             task_loss_requirement=task_loss,
             attention_type=os.getenv(  # type: ignore[arg-type]
-                "VLLM_AUTOGAZE_ATTN_TYPE", "block_causal"
+                "AUTOGAZE_ATTN_TYPE", "block_causal"
             ).lower(),
             frame_independent_encoding=_env_bool(
-                "VLLM_AUTOGAZE_FRAME_INDEPENDENT", False
+                "AUTOGAZE_FRAME_INDEPENDENT", False
             ),
-            device=os.getenv("VLLM_AUTOGAZE_DEVICE", "cuda"),
+            device=os.getenv("AUTOGAZE_DEVICE", "cuda"),
         )
         config.validate()
         return config

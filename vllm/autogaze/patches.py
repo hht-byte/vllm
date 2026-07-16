@@ -20,6 +20,8 @@ _applied = False
 _original_call_hf_processor = None
 _original_get_mm_fields_config = None
 _original_get_prompt_updates = None
+_original_parse_image_input = None
+_original_process_image_input = None
 _original_parse_video_input = None
 _original_process_video_input = None
 _original_get_mrope_input_positions = None
@@ -34,6 +36,16 @@ _AUTOGAZE_FIELDS = (
     "autogaze_full_grid_thw",
     "autogaze_num_grids",
     "autogaze_full_patch_counts",
+)
+
+_AUTOGAZE_IMAGE_FIELDS = (
+    "autogaze_image_gazing_pos",
+    "autogaze_image_gazing_pos_length",
+    "autogaze_image_mrope_positions",
+    "autogaze_image_num_output_tokens",
+    "autogaze_image_full_grid_thw",
+    "autogaze_image_num_grids",
+    "autogaze_image_full_patch_counts",
 )
 
 
@@ -102,17 +114,24 @@ def _patch_processor() -> None:
                 hf_processor_mm_kwargs,
             )
         )
-        if "autogaze_full_patch_counts" not in hf_inputs:
-            return fields
-
-        fields["pixel_values_videos"] = MultiModalFieldConfig.flat_from_sizes(
-            "video", hf_inputs["autogaze_full_patch_counts"]
-        )
-        for key in _AUTOGAZE_FIELDS:
-            fields[key] = MultiModalFieldConfig.batched(
-                "video",
-                keep_on_cpu=key != "autogaze_gazing_pos",
+        if "autogaze_image_full_patch_counts" in hf_inputs:
+            fields["pixel_values"] = MultiModalFieldConfig.flat_from_sizes(
+                "image", hf_inputs["autogaze_image_full_patch_counts"]
             )
+            for key in _AUTOGAZE_IMAGE_FIELDS:
+                fields[key] = MultiModalFieldConfig.batched(
+                    "image",
+                    keep_on_cpu=key != "autogaze_image_gazing_pos",
+                )
+        if "autogaze_full_patch_counts" in hf_inputs:
+            fields["pixel_values_videos"] = MultiModalFieldConfig.flat_from_sizes(
+                "video", hf_inputs["autogaze_full_patch_counts"]
+            )
+            for key in _AUTOGAZE_FIELDS:
+                fields[key] = MultiModalFieldConfig.batched(
+                    "video",
+                    keep_on_cpu=key != "autogaze_gazing_pos",
+                )
         return fields
 
     def autogaze_get_prompt_updates(
@@ -129,17 +148,40 @@ def _patch_processor() -> None:
                 out_mm_kwargs,
             )
         )
-        if (
-            not _config.enabled
-            or not _is_qwen3_5_processor(self)
-            or "video" not in out_mm_kwargs
-            or not out_mm_kwargs["video"]
-            or "autogaze_num_tokens_per_frame" not in out_mm_kwargs["video"][0]
-        ):
+        if not _config.enabled or not _is_qwen3_5_processor(self):
             return updates
 
         tokenizer = self.info.get_tokenizer()
         hf_config = self.info.get_hf_config()
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+
+        has_image_gaze = (
+            "image" in out_mm_kwargs
+            and bool(out_mm_kwargs["image"])
+            and "autogaze_image_num_output_tokens" in out_mm_kwargs["image"][0]
+        )
+        if has_image_gaze:
+            def get_image_replacement(item_idx: int):
+                out_item = out_mm_kwargs["image"][item_idx]
+                count = int(out_item["autogaze_image_num_output_tokens"].data)
+                return [hf_processor.image_token_id] * count
+
+            updates = [update for update in updates if update.modality != "image"]
+            updates.append(
+                PromptReplacement(
+                    modality="image",
+                    target=hf_processor.image_token,
+                    replacement=get_image_replacement,
+                )
+            )
+
+        has_video_gaze = (
+            "video" in out_mm_kwargs
+            and bool(out_mm_kwargs["video"])
+            and "autogaze_num_tokens_per_frame" in out_mm_kwargs["video"][0]
+        )
+        if not has_video_gaze:
+            return updates
 
         def get_video_replacement(item_idx: int):
             out_item = out_mm_kwargs["video"][item_idx]
@@ -173,6 +215,8 @@ def _patch_processor() -> None:
 
 
 def _patch_model() -> None:
+    global _original_parse_image_input
+    global _original_process_image_input
     global _original_parse_video_input
     global _original_process_video_input
     global _original_get_mrope_input_positions
@@ -182,6 +226,12 @@ def _patch_model() -> None:
     from vllm.multimodal.evs import compute_mrope_for_media
 
     if _original_parse_video_input is None:
+        _original_parse_image_input = (
+            Qwen3VLForConditionalGeneration._parse_and_validate_image_input
+        )
+        _original_process_image_input = (
+            Qwen3VLForConditionalGeneration._process_image_input
+        )
         _original_parse_video_input = (
             Qwen3VLForConditionalGeneration._parse_and_validate_video_input
         )
@@ -191,6 +241,57 @@ def _patch_model() -> None:
         _original_get_mrope_input_positions = (
             Qwen3VLForConditionalGeneration.get_mrope_input_positions
         )
+
+    def autogaze_parse_image_input(self, **kwargs: object):
+        image_input = _original_parse_image_input(self, **kwargs)
+        if image_input is None or "autogaze_image_gazing_pos" not in kwargs:
+            return image_input
+        for key in _AUTOGAZE_IMAGE_FIELDS:
+            image_input[key] = kwargs.get(key)  # type: ignore[literal-required]
+        return image_input
+
+    def autogaze_process_image_input(self, image_input):
+        if "autogaze_image_gazing_pos" not in image_input:
+            return _original_process_image_input(self, image_input)
+        if image_input["type"] != "pixel_values":
+            raise ValueError("AutoGaze requires Qwen pixel image inputs")
+
+        pixels = image_input["pixel_values"]
+        full_patch_counts = image_input["autogaze_image_full_patch_counts"]
+        selected_rows = image_input["autogaze_image_gazing_pos"]
+        selected_lengths = image_input["autogaze_image_gazing_pos_length"]
+        output_tokens = image_input["autogaze_image_num_output_tokens"]
+        full_grids = image_input["autogaze_image_full_grid_thw"]
+        num_grids = image_input["autogaze_image_num_grids"]
+
+        merge_unit = self.visual.spatial_merge_size**2
+        outputs: list[torch.Tensor] = []
+        pixel_offset = 0
+        for item_idx, patch_count_value in enumerate(full_patch_counts.tolist()):
+            patch_count = int(patch_count_value)
+            item_pixels = pixels[pixel_offset : pixel_offset + patch_count]
+            pixel_offset += patch_count
+
+            gaze_length = int(selected_lengths[item_idx])
+            item_gaze = selected_rows[item_idx, :gaze_length]
+            output_count = int(output_tokens[item_idx])
+            grid_count = int(num_grids[item_idx])
+            grid_list = full_grids[item_idx, :grid_count].tolist()
+            embeddings = run_qwen3_5_autogaze_vision(
+                self.visual,
+                item_pixels,
+                full_grid_thw=grid_list,
+                gazing_pos=item_gaze,
+                input_tokens_per_frame=[output_count * merge_unit],
+                attention_type=_config.attention_type,
+                frame_independent_encoding=_config.frame_independent_encoding,
+            )
+            if embeddings.shape[0] != output_count:
+                raise RuntimeError(
+                    "Qwen AutoGaze merger output does not match image token count"
+                )
+            outputs.append(embeddings)
+        return tuple(outputs)
 
     def autogaze_parse_video_input(self, **kwargs: object):
         video_input = _original_parse_video_input(self, **kwargs)
@@ -253,6 +354,7 @@ def _patch_model() -> None:
     def autogaze_get_mrope_input_positions(self, input_tokens, mm_features):
         if not any(
             _field_data(feature, "autogaze_mrope_positions") is not None
+            or _field_data(feature, "autogaze_image_mrope_positions") is not None
             for feature in mm_features
         ):
             return _original_get_mrope_input_positions(
@@ -277,11 +379,20 @@ def _patch_model() -> None:
         for feature in sorted(mm_features, key=lambda item: item.mm_position.offset):
             if feature.modality == "image":
                 token_id = self.config.image_token_id
-                grid = _field_data(feature, "image_grid_thw")
-                local_positions = compute_mrope_for_media(
-                    grid,
-                    self.visual.spatial_merge_size,
-                )[:, :3].cpu()
+                autogaze_positions = _field_data(
+                    feature, "autogaze_image_mrope_positions"
+                )
+                if autogaze_positions is None:
+                    grid = _field_data(feature, "image_grid_thw")
+                    local_positions = compute_mrope_for_media(
+                        grid,
+                        self.visual.spatial_merge_size,
+                    )[:, :3].cpu()
+                else:
+                    output_tokens = int(
+                        _field_data(feature, "autogaze_image_num_output_tokens")
+                    )
+                    local_positions = autogaze_positions[:output_tokens].cpu()
                 groups = [local_positions]
             elif feature.modality == "video":
                 token_id = self.config.video_token_id
@@ -339,6 +450,10 @@ def _patch_model() -> None:
         delta = int(positions.max() + 1 - sequence_length)
         return position_tensor, delta
 
+    Qwen3_5ForConditionalGeneration._parse_and_validate_image_input = (
+        autogaze_parse_image_input
+    )
+    Qwen3_5ForConditionalGeneration._process_image_input = autogaze_process_image_input
     Qwen3_5ForConditionalGeneration._parse_and_validate_video_input = (
         autogaze_parse_video_input
     )

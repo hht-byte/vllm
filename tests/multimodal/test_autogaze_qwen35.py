@@ -4,7 +4,9 @@
 import pytest
 import torch
 import torch.nn as nn
+from transformers.feature_extraction_utils import BatchFeature
 
+import vllm.autogaze.processor as autogaze_processor
 from vllm.autogaze.config import AutoGazeConfig
 from vllm.autogaze.core import (
     build_autogaze_attention_mask,
@@ -100,10 +102,10 @@ def test_frame_independent_attention_removes_cross_frame_edges():
 
 
 def test_autogaze_config_from_env(monkeypatch):
-    monkeypatch.setenv("VLLM_AUTOGAZE_ENABLED", "1")
-    monkeypatch.setenv("VLLM_AUTOGAZE_SCALES", "64+128+256")
-    monkeypatch.setenv("VLLM_AUTOGAZE_TASK_LOSS", "none")
-    monkeypatch.setenv("VLLM_AUTOGAZE_ATTN_TYPE", "causal")
+    monkeypatch.setenv("AUTOGAZE_ENABLED", "1")
+    monkeypatch.setenv("AUTOGAZE_SCALES", "64+128+256")
+    monkeypatch.setenv("AUTOGAZE_TASK_LOSS", "none")
+    monkeypatch.setenv("AUTOGAZE_ATTN_TYPE", "causal")
 
     config = AutoGazeConfig.from_env()
 
@@ -116,6 +118,59 @@ def test_autogaze_config_from_env(monkeypatch):
 def test_autogaze_config_rejects_unsorted_scales():
     with pytest.raises(ValueError, match="unique and increasing"):
         AutoGazeConfig(scales=(128, 64)).validate()
+
+
+def test_image_input_keeps_one_temporal_grid(monkeypatch):
+    class _VisionConfig:
+        patch_size = 16
+        spatial_merge_size = 2
+
+    class _Config:
+        vision_config = _VisionConfig()
+
+    class _Info:
+        def get_hf_config(self):
+            return _Config()
+
+    class _Processor:
+        info = _Info()
+
+    def fake_run_autogaze(video, **kwargs):
+        assert video.shape == (1, 32, 32, 3)
+        return {
+            "gazing_pos": torch.tensor([[0]]),
+            "num_gazing_each_frame": torch.tensor([1]),
+            "if_padded_gazing": torch.tensor([[False]]),
+        }
+
+    def fake_patchify(*args, **kwargs):
+        return torch.zeros(4, 8), [(2, 2)]
+
+    monkeypatch.setattr(autogaze_processor, "_run_autogaze", fake_run_autogaze)
+    monkeypatch.setattr(
+        autogaze_processor,
+        "_qwen_patchify_image_scales",
+        fake_patchify,
+    )
+
+    outputs = autogaze_processor.build_qwen3_5_autogaze_outputs(
+        _Processor(),
+        mm_data={"images": [torch.zeros(3, 32, 32, dtype=torch.uint8)]},
+        mm_kwargs={},
+        tok_kwargs={},
+        original_outputs=BatchFeature(
+            {
+                "pixel_values": torch.zeros(4, 8),
+                "image_grid_thw": torch.tensor([[1, 2, 2]]),
+            }
+        ),
+        config=AutoGazeConfig(scales=(32,), device="cpu"),
+    )
+
+    assert outputs["autogaze_image_num_output_tokens"].tolist() == [1]
+    assert outputs["autogaze_image_gazing_pos_length"].tolist() == [4]
+    assert outputs["autogaze_image_full_patch_counts"].tolist() == [4]
+    assert outputs["image_grid_thw"].tolist() == [[1, 2, 2]]
 
 
 class _FakeParallelLinear(nn.Module):
